@@ -1,0 +1,412 @@
+SET ThousandSep=',';
+SET DecimalSep='.';
+SET MoneyThousandSep=',';
+SET MoneyDecimalSep='.';
+SET MoneyFormat='#,##0.00 $;-#,##0.00 $';
+SET TimeFormat='hh:mm:ss';
+SET DateFormat='YYYY/MM/DD';
+SET TimestampFormat='YYYY/MM/DD hh:mm:ss';
+SET FirstWeekDay=0;
+SET BrokenWeeks=0;
+SET ReferenceDay=4;
+SET FirstMonthOfYear=1;
+SET CollationLocale='US';
+SET CreateSearchIndexOnReload=1;
+SET MonthNames='Jan;Feb;Mar;Apr;May;Jun;Jul;Aug,Sep;Oct;Nov;Dec';
+SET LongMonthNames='January;February;March;April;May;June;July;August;September;October;November;December';
+SET DayNames='Mon;Tue;Wed;Thur;Fri;Sat;Sun';
+SET LongDayNames='Monday;Tuesday;Wednesday;Thursday;Friday;Satday;Sunday';
+SET NumericalAbbreviation='3:k;6:M;9:G;12:T;15:P;18:E;21:Z;24:Y;-3:m;-6:μ;-9:n;-12:p;-15:f;-18:a;-21:z;-24:y';
+
+
+
+//
+// LOAD PART NUMBERS OF INTEREST FROM SPREADSHEET 
+//
+
+PNs1col:
+NoConcatenate
+LOAD
+    "MSEB Supplied Parts",
+    "MSEI PN" as Material
+
+FROM "lib://[US] - DFS QlikRepository/MSEI_SCM/MSEBSuppliedParts3.xlsx"
+(ooxml, embedded labels, table is Sheet1);
+
+
+Concatenate
+LOAD
+    "MSEB Supplied Parts",
+    "Tested PN" as Material
+
+FROM "lib://[US] - DFS QlikRepository/MSEI_SCM/MSEBSuppliedParts3.xlsx"
+(ooxml, embedded labels, table is Sheet1);
+
+//
+// JOIN WITH INVENTORY IN TRANSIT 
+//
+
+InTransit:
+Left Join (PNs1col)
+LOAD 
+    Material,
+    Num((replace(Quantity, '.', ',')),'###,###') as "Stock in Transit"
+    
+FROM [lib://BI_LAYER - SAP BW - MSEI INCOMING GOODS/RM07MTRB_DATE_1300.qvd]
+(qvd)
+where 
+ Purch.Doc. <> '102057'
+and
+Purch.Doc. <> '101820'
+;
+
+//
+// JOIN WITH INVENTORY IN STOCK 
+//
+
+LET vToday = Date((Today(1)-1),'YYYY_MM_DD');
+
+Inventory1Col:
+Left Join (PNs1col)
+LOAD
+     Timestamp(Filetime_MARD) as "Date file last updated",
+     Date(Date) as "Date of Inv Snapshot",
+     replace(ltrim(replace(MATNR, '0', ' ')), ' ', 0) as Material,
+     sum(Num(LABST,'###,###')) as "Valuated Unrestricted-Use Stock",
+     sum(Num(INSME,'###,###')) as "Stock in Quality Inspection",
+     sum(Num((LABST + INSME),'###,###')) as "Usable Inventory"
+
+       
+FROM "lib://[US] - MSEI QlikRepository/zDataExtracts/MARD_Daily/MARD_$(vToday).QVD"
+(qvd)
+where WERKS='2000'
+Group By MATNR, Filetime_MARD, Date
+;
+
+
+//
+// LOAD PART NUMBERS OF INTEREST FROM SPREADSHEET 
+//
+
+PNs1col2:
+NoConcatenate
+LOAD
+    "MSEI PN" as Material
+
+FROM "lib://[US] - DFS QlikRepository/MSEI_SCM/MSEBSuppliedParts3.xlsx"
+(ooxml, embedded labels, table is Sheet1);
+
+Concatenate
+LOAD
+    "Tested PN" as Material
+FROM "lib://[US] - DFS QlikRepository/MSEI_SCM/MSEBSuppliedParts3.xlsx"
+(ooxml, embedded labels, table is Sheet1);
+
+
+//
+// JOIN WITH SAFETY DAYS & SAFETY STOCK 
+// 
+
+Left Join (PNs1col2)
+LOAD
+    replace(ltrim(replace(MATNR, '0', ' ')), ' ', 0)  as "Material",
+    Num(EISBE,'###,###') as "Safety Stock",
+    Num(SHZET,'###,###') as "Safety Time (days)",
+    (Num(SHZET,'###,###')/5) as "Safety Time (wks)"
+
+FROM [lib://SAP - QVD/MARC.qvd]
+(qvd)
+where WERKS = '2000';
+
+//
+// CALCULATE ADJUSTED SAFETY TIMES
+//
+
+PNs2Col:
+NoConcatenate
+LOAD
+    "MSEI PN",
+    "MSEB Supplied Parts",
+    "Tested PN"
+
+FROM "lib://[US] - DFS QlikRepository/MSEI_SCM/MSEBSuppliedParts3.xlsx"
+(ooxml, embedded labels, table is Sheet1);
+
+
+Left Join (PNs2Col)
+LOAD
+    "Material" as "MSEI PN",
+    "Safety Time (days)" as "MSEI PN Safety Time (days)",
+    "Safety Time (wks)" as "MSEI PN Safety Time (wks)"
+
+Resident [PNs1col2];
+
+Left Join  (PNs2Col)
+LOAD
+    "Material" as "Tested PN",
+    "Safety Time (days)" as "Tested PN Safety Time (days)",
+    "Safety Time (wks)" as "Tested PN Safety Time (wks)"
+
+Resident [PNs1col2]; 
+
+Adjusted2col:
+NoConcatenate
+LOAD
+    "MSEI PN",
+    "Tested PN",
+    "Tested PN Safety Time (days)",
+    "Tested PN Safety Time (wks)",
+    "MSEI PN Safety Time (days)",
+    "MSEI PN Safety Time (wks)",
+	"Tested PN Safety Time (days)"+"MSEI PN Safety Time (days)" as "Tested PN Safety Time Adj (days)",
+    "Tested PN Safety Time (wks)"+"MSEI PN Safety Time (wks)" as "Tested PN Safety Time Adj (wks)"
+
+Resident [PNs2Col];
+
+Drop table [PNs1col2];
+Drop table [PNs2Col];
+
+
+//
+// CREATE ONE COLUMN OF PN's WITH SAFETY TIME INFO
+//
+
+Adjusted1col:
+NoConcatenate
+LOAD
+    "MSEI PN" as Material,
+ 	"MSEI PN Safety Time (days)" as "Safety Time (days)",
+    "MSEI PN Safety Time (wks)" as "Safety Time (wks)"
+	,Date(Today(-1) + "MSEI PN Safety Time (days)" + ("MSEI PN Safety Time (days)"/5*2)) as "Safety Time (date)"
+    
+Resident [Adjusted2col];
+
+
+Concatenate
+LOAD
+    "Tested PN" as Material
+     ,"Tested PN Safety Time (days)" as "Safety Time (days)"
+ 	,"Tested PN Safety Time (wks)" as "Safety Time (wks)"
+  	,"Tested PN Safety Time Adj (days)" as "Safety Time Adj (days)"
+    ,"Tested PN Safety Time Adj (wks)" as "Safety Time Adj (wks)" 
+    ,Date(Today(-1) + "Tested PN Safety Time (days)" + ("Tested PN Safety Time (days)"/5*2)) as "Safety Time (date)"
+    ,Date(Today(-1) + "Tested PN Safety Time Adj (days)" + ("Tested PN Safety Time Adj (days)"/5*2)) as "Safety Time Adj (date)"
+    
+Resident [Adjusted2col];
+
+Drop Table [Adjusted2col];
+
+
+//
+// JOIN WITH DEMAND 
+//
+
+Demand:
+Left Join (Adjusted1col)
+LOAD
+    replace(ltrim(replace("/BIC/P40MATNR", '0', ' ')), ' ', 0)  as "Material",
+    "/BIC/P01EXTDT" as "Date Demand Refreshed",
+    CALYEAR,
+    CALMONTH,
+    CALWEEK,
+    CALDAY,
+    "/BIC/Y51Q5001P" as "Demand"
+
+FROM [lib://BI_LAYER - QVD SECURE - SCM- MRP_MSEI/Q05D01C MD04 Daten_2000.qvd]
+(qvd)
+where "/BIC/Z05FLST"<>'X'
+and  CALDAY >= Date((Today(1)-1),'YYYY/MM/DD')
+;
+
+//
+// SUM DEMAND TO SAFETY DAY 
+//
+
+DemandSummary:
+NoConcatenate
+LOAD
+    "Material",
+//    "Date Demand Refreshed",
+	Num((Sum("Demand")),'###,###') as "Demand to Safety Time (date)"
+    
+Resident [Adjusted1col]
+
+where CALDAY <= "Safety Time (date)"
+group by "Material"//,"Date Demand Refreshed"
+;
+
+//
+// SUM DEMAND TO SAFETY DAY ADJ
+//
+
+DemandSummaryAdj:
+NoConcatenate
+LOAD
+    "Material",
+    Num((Sum("Demand")),'###,###') as "Demand to Safety Time Adj (date)"
+
+Resident [Adjusted1col]
+
+where CALDAY <= "Safety Time Adj (date)"
+group by "Material"//,"Date Demand Refreshed"
+;
+
+//
+// JOIN DEMAND SUMMARY & DEMAND SUMMARY ADJ TABLES TO 
+// TABLE OF PNs 
+//
+
+Adjusted1colx:
+NoConcatenate
+Load 
+    Material
+    ,"Safety Time (days)"
+ 	,"Safety Time (wks)"
+  	,"Safety Time Adj (days)"
+    ,"Safety Time Adj (wks)" 
+    ,"Safety Time (date)"
+    ,"Safety Time Adj (date)"
+
+    Resident [Adjusted1col];
+
+Left Join (Adjusted1colx)
+LOAD
+    "Material",
+	"Demand to Safety Time (date)"
+
+    Resident [DemandSummary];
+    
+Left Join (Adjusted1colx)
+LOAD
+    "Material",
+	"Demand to Safety Time Adj (date)"
+
+    Resident [DemandSummaryAdj];
+
+Drop Table [Adjusted1col];
+Drop Table [DemandSummary];
+Drop Table [DemandSummaryAdj];
+
+//
+// CALC DEMAND FORECAST DATE INCLUDING "SAFETY TIME" ATTRIBUTE THAT IS MAINTAINED IN SAP
+//
+
+Adjusted1colxx:
+NoConcatenate
+Load 
+    Material
+    ,"Safety Time (days)"
+    ,"Safety Time (wks)"
+    ,"Safety Time Adj (days)"
+    ,"Safety Time Adj (wks)" 
+    ,"Safety Time (date)"
+    ,"Safety Time Adj (date)"
+    ,"Demand to Safety Time (date)"
+    ,If(IsNull("Demand to Safety Time Adj (date)")=-1,"Demand to Safety Time (date)","Demand to Safety Time Adj (date)") as "Demand to Safety Time Adj (date)"
+
+    Resident [Adjusted1colx];
+    Drop Table [Adjusted1colx];
+
+Left Join (Adjusted1colxx)
+
+LOAD
+    replace(ltrim(replace(MATNR, '0', ' ')), ' ', 0)  as "Material",
+    Num(EISBE,'###,###') as "Safety Stock"
+ 
+FROM [lib://SAP - QVD/MARC.qvd]
+(qvd)
+where WERKS = 2000;
+
+//
+// GET ALL THE INFO INTO THE DESIRED FINAL FORMAT 
+//
+
+FinalFormat0:
+NoConcatenate
+LOAD
+    "MSEI PN",
+    "MSEB Supplied Parts",
+    "Where Used",
+    "Tested PN"
+FROM "lib://[US] - DFS QlikRepository/MSEI_SCM/MSEBSuppliedParts3.xlsx"
+(ooxml, embedded labels, table is Sheet1);
+
+Inventory:
+Left Join (FinalFormat0)
+Load 
+	Material as "MSEI PN",
+    "Usable Inventory" as "MSEI PN Usable Inventory"
+    ,"Stock in Transit" as "MSEIPN Stock In Trst"
+    
+Resident [PNs1col];
+
+Inventory2:
+Left Join (FinalFormat0)
+Load 
+    Material as "Tested PN",
+    "Usable Inventory" as "Tested PN Usable Inventory"
+    ,"Stock in Transit" as "TestedPN Stock In Trst"
+
+Resident [PNs1col];
+
+
+FinalFormat:
+Load 
+    "MSEB Supplied Parts",
+    "Where Used",
+    "Tested PN",
+	"MSEI PN",
+    If (Len("MSEIPN Stock In Trst") >0, "MSEIPN Stock In Trst", "TestedPN Stock In Trst") as "Stock in Transit",
+    "Tested PN Usable Inventory",
+    "MSEI PN Usable Inventory"
+     
+Resident [FinalFormat0];
+
+drop table FinalFormat0;
+drop table PNs1col;
+
+SafetyDemand:
+Left Join  (FinalFormat)
+LOAD
+    "Material" as "MSEI PN",
+     "Safety Time (days)" as "MSEI PN Safety Time (days)",
+     "Safety Time (wks)" as "MSEI PN Safety Time (wks)",
+     "Safety Time (date)" as "MSEI PN Safety Time (date)",
+	"Demand to Safety Time (date)" as "MSEI PN Demand to Safety Time (date)",
+    "Safety Stock" as "MSEI PN Static Safety Stock" 
+
+Resident [Adjusted1colxx];
+
+
+SafetyDemand2:
+Left Join  (FinalFormat)
+LOAD
+    "Material" as "Tested PN",
+     "Safety Time (days)" as "Tested PN Safety Time (days)",
+     "Safety Time (wks)" as "Tested PN Safety Time (wks)",
+     "Safety Time (date)" as "Tested PN Safety Time (date)",
+	"Demand to Safety Time (date)" as "Tested PN Demand to Safety Time (date)",
+    "Demand to Safety Time Adj (date)" as "Tested PN Demand to Safety Time Adj (date)",
+    "Safety Stock" as "Tested PN Static Safety Stock"
+
+Resident [Adjusted1colxx]; 
+drop table Adjusted1colxx;
+
+
+DemandDate:
+NoConcatenate
+LOAD
+    "/BIC/P01EXTDT" as "Date of Demand Snapshot"
+FROM [lib://BI_LAYER - QVD SECURE - SCM- MRP_MSEI/Q05D01C MD04 Daten_2000.qvd]
+(qvd);
+
+InvDate:
+NoConcatenate
+LOAD
+ 	Timestamp(Filetime_MARD) as "Date file last updated",
+ 	Date(Date) as "Date of Inv Snapshot"
+    
+FROM "lib://[US] - MSEI QlikRepository/zDataExtracts/MARD_Daily/MARD_$(vToday).QVD"
+(qvd)
+where WERKS='2000';
+
